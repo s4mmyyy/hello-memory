@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 load_dotenv() 
 from hello_agents import SimpleAgent, HelloAgentsLLM, ToolRegistry
 from hello_agents.tools import MemoryTool
+#from hello_agents.memory.storage.qdrant_store import QdrantStore
+
 
 # 创建具有记忆能力的Agent
 llm = HelloAgentsLLM()
