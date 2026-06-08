@@ -43,4 +43,80 @@ class MemoryTool(Tool):
             **metadata
     ) -> str:
         """添加记忆"""
+        try:
+            # 确保会话DI存在
+            if self.current_session_id is None:
+                self.current_session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            # 感知记忆文件支持
+            if memory_type == "perceptual" and file_path:
+                inferred = modality or self._infer_modality(file_path)
+                metadata.setdefault("modality", inferred)
+                metadata.setdefault("raw_data", file_path)
+            
+            # 添加会话信息到元数据
+            metadata.update({
+                "session_id": self.current_session_id,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            memory_id = self.memory_manager.add_memory(
+                content=content,
+                memory_type = memory_type,
+                importance = importance,
+                metadata = metadata,
+                auto_classify=False
+            )
+
+            return f"✅ 记忆已添加 (ID: {memory_id[:8]}...)"
         
+        except Exception as e:
+            return f"❌ 添加记忆失败: {str(e)}"
+        
+    def _search_memory(
+            self,
+            query: str,
+            limit: int = 5,
+            memory_types: List[str] = None,
+            memory_type: str = None,
+            min_importance: float = 0.1
+    ) -> str:
+        """搜索记录"""
+        try:
+            #参数标准化处理
+            if memory_type and not memory_types:
+                memory_types = [memory_type]
+            
+            results = self.memory_manager.retrieve_memories(
+                query = query,
+                limit=limit,
+                memory_types=memory_types,
+                min_importance=min_importance
+            )
+
+            if not results:
+                return f"🔍 未找到与 '{query}' 相关的记忆"
+            
+            #格式化结果
+            formatted_results = []
+            formatted_results.append(f"🔍 找到 {len(results)} 条相关记忆:")
+
+            for i, memory in enumerate(results, 1):
+                memory_type_label = {
+                    "working": "工作记忆",
+                    "episodic": "情景记忆",
+                    "semantic": "语义记忆",
+                    "perceptual": "感知记忆"
+                }.get(memory.memory_type, memory.memory_type)
+
+                content_preview = memory.content[:80] + "..:" if len(memory.content) > 80 else memory.conetnt
+                formatted_results.append(
+                    f"{i}. [{memory_type_label}] {content_preview} (重要性: {memory.importance:.2f})"
+                )
+
+            return "\n".join(formatted_results)
+        
+        except Exception as e:
+            return f"❌ 搜索记忆失败: {str(e)}"
+
+
