@@ -15,7 +15,7 @@ memory_tool = MemoryTool(user_id="user123")
 tool_registry = ToolRegistry()
 tool_registry.register_tool(memory_tool)
 agent.tool_registry = tool_registry
- 
+
 # 体验记忆功能
 print("=== 添加多个记忆 ===")
 
