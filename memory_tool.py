@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from hello_agents.tools import Tool, ToolParameter
-from hello_agents.memory import MemoryManager, MemoryConfig
+from hello_agents.memory import BaseMemory, MemoryItem, MemoryManager, MemoryConfig, SQLiteDocumentStore
 
 
 class MemoryManager:
@@ -230,17 +230,17 @@ class WorkingMemory:
     
     def add(self, memory_item: MemoryItem) -> str:
         """添加工作记忆"""
-        self._expire_old_memories() # 过期清理
+        self._expire_old_memories() # 过期清理, 添加记忆前，先扔掉过期的记忆
 
         if len(self.memories) >= self.max_capacity:
-            self._remove_lowest_priority_memory() # 容量管理
+            self._remove_lowest_priority_memory() # 容量管理：如果当前记忆超过最大容量的话，再扔掉不重要的记忆
 
-        self.memories.append(memory_item)
+        self.memories.append(memory_item) # 最后才是添加记忆
         return memory_item.id
     
-    def retrieve(self, query: str, limit: int = 5 **kwargs) -> List[MemoryItem]:
+    def retrieve(self, query: str, limit: int = 5, **kwargs) -> List[MemoryItem]:
         """混合检索：TF-IDF向量化 + 关键词匹配"""
-        self._expire_old_memories()
+        self._expire_old_memories() # 检索前先清理过期数据
 
         # 尝试TF-IDF向量搜索
         vector_scores = self._try_tfidf_search(query)
@@ -248,12 +248,12 @@ class WorkingMemory:
         # 计算综合分数
         # 最终得分公式为：(相似度 × 时间衰减) × (0.8 + 重要性 × 0.4)。
         scored_memories = []
-        for memory in self.memories:
+        for memory in self.memories:  #注意：这里搜索的是self.memories 这个内存列表，而不是数据库
             vector_score = vector_scores.get(memory.id, 0.0)
-            keyword_score = self._calculate_keyword_score(query, memory.content)
+            keyword_score = self._calculate_keyword_score(query, memory.content) #关键词匹配
 
             #混合评分
-            base_relevance = vector_score *0.7 + keyword_score * 0.3 if vector_score > 0 else keyword_score #如果vector_score为0就退化为关键词匹配
+            base_relevance = vector_score *0.7 + keyword_score * 0.3 if vector_score > 0 else keyword_score #如果vector_score为0就退化为关键词匹配，如果TF-IDF有结果（vector_score > 0）：混合使用，TF-IDF占70%，关键词匹配占30%
             time_decay = self._calculate_time_decay(memory.timestamp)
             importance_weight = 0.8 + (memory.importance * 0.4)
 
@@ -268,7 +268,7 @@ class WorkingMemory:
 class EpisodicMemory:
     """情景记忆实现
     特点：
-    - SQLite+Qdrant混合存储架构
+    - SQLite+Qdrant混合存储架构，SQLite负责结构化预过滤(筛掉时间不对、会话不对的)，Qdrant负责语义向量检索(在剩下的里面找意思最像的)
     - 支持时间序列和会话级检索
     - 结构化过滤 + 语义向量检索
     """
@@ -292,7 +292,7 @@ class EpisodicMemory:
 
         # 更新会话索引
         session_id = episode.session_id
-        if session_id not in self.sessions:
+        if session_id not in self.sessions: # self.sessions 是一个放在内存里的字典，相当于一个快速导航表：
             self.sessions[session_id] = []
         self.sessions[session_id].append(episode.episode_id)
 
@@ -303,4 +303,153 @@ class EpisodicMemory:
     def retrieve(self, query: str, limit: int =5, **kwargs) -> List[MemoryItem]:
         """混合检索： 结构化过滤 + 语义向量检索"""
         # 1. 结构化预过滤（时间范围、重要性等）
+        candidate_ids = self._structured_filter(**kwargs)
+
+        # 2. 向量语义检索
+        hits = self._vector_search(query, limit * 5, kwargs.get("user_id"))
+
+        # 3. 综合评分与排序
+        results = []
+        for hit in hits:
+            if self._should_include(hit, candidate_ids, kwargs):
+                score = self._calculate_episode_score(hit)
+                memory_item = self._create_memory_item(hit)
+                results.append((score, memory_item))
+        
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in results[:limit]]
+
+    def _calculate_episode_score(self, hit) -> float:
+        """情景记忆评分算法"""
+        vec_score = float(hit.get("score", 0.0))
+        recency_score = self._calculate_recency(hit["metadata"]["timestamp"])
+        importance = hit["metadata"].get("importance",0.5)
+
+        # 评分公式：(向量相似度 * 0.8 + 时间近因性 * 0.2) * 重要性权重
+        base_relevance = vec_score * 0.8 + recency_score * 0.2 # 语义匹配度占80%权重，时间近因性占20%权重
+        importance_weight = 0.8 + (importance * 0.4)
+
+        return base_relevance * importance_weight
+    
+
+class SemanticMemory(BaseMemory):
+    """语义记忆实现
+
+    特点：
+    - 使用HuggingFace中文预训练模型进行文本嵌入
+    - 向量检索进行快速相似度匹配
+    - 知识图谱存储实体和关系
+    - 混合检索策略：向量+图+语义推理
+    """
+
+    def __init__(self, config: MemoryConfig, storage_backend=None):
+        super().__init__(config, storage_backend)
+
+        # 嵌入模型（统一提供）
+        self.embedding_model = get_text_embedder()
+
+        # 专业数据库存储
+        self.vector_store = QdrantConnectionManager.get_instance(**qdrant_config)
+        self.graph_store = Neo4jGraphStore(**neo4j_config)
+
+        # 实体和关系缓存
+        self.entities: Dict[str, Entity] = {}
+        self.relations: List[Relation] = []
+
+        # NLP处理器（支持中英文）
+        self.nlp = self._init_.nlp()
+    
+    def add(self, memory_item: MemoryItem) -> str:
+        """添加语义记忆"""
+        # 1. 生成文本嵌入
+        embedding = self.embedding_model.encode(memory_item.content)
+
+        # 2. 提取实体和关系
+        entities = self._extract_entities(memory_item.content)
+        relations = self._extract_relations(memory_item.content, entities)
+
+        # 3. 存储到Neo4j数据库
+        for entity in entities:
+            self._add_entity_to_graph(entity, memory_item)
+        
+        for relation in relations:
+            self._add_relation_to_graph(relation, memory_item)
+        
+        # 4. 存储到Qdrant向量数据库
+        metadata = {
+            "memory_id": memory_item.id,
+            "entities": [e.entity_id for e in entities],
+            "entity_count": len(entities),
+            "relation_count": len(relations)
+        }
+
+        self.vector_store.add_vectors(
+            vectors=[embedding.tolist()],
+            metadata=[metadata],
+            ids=[memory_item.id]
+        )
+
+    def retrieve(self, query: str, limit: int = 5, **kwargs) -> List[MemoryItem]:
+        """检索语义记忆"""
+        # 1. 向量检索
+        vector_results = self._vector_search(query, limit * 2, user_id)
+
+        # 2. 图检索
+        graph_results = self._graph_search(query, limit * 2, userid)
+
+        # 3. 混合排序
+        combined_results = self._combine_and_rank_results(
+            vector_results, graph_results, query, limit
+        )
+
+        return combined_results[:limit]
+    
+    def _combine_and_rank_results(self, vector_results, graph_results, query, limit):
+        """混合排序结果"""
+        combined = {}
+
+        #合并向量和图检索结果
+        for result in vector_results:
+            combined[result["memory_id"]] = {
+                **result,
+                "vector_score": result.get("score",0.0),
+                "graph_score": 0.0
+            }
+        
+        for result in graph_results:
+            memory_id = result["memory_id"]
+            if memory_id in combined:
+                combined[memory_id]["graph_score"] = result.get("similarity", 0.0)
+            else:
+                combined[memory_id] = {
+                    **result,
+                    "vector_score": 0.0,
+                    "graph_score": result.get("similarity", 0.0)
+                }
+        
+        #计算混合分数
+        for memory_id, result in combined.items():
+            vector_score = result["vector_score"]
+            graph_score = result["graph_score"]
+            importance = result.get("importance", 0.5)
+
+            # 基础相似度得分
+            base_relevance = vector_score *0.7 + graph_score * 0.3
+
+            #重要性权重 [0.8, 1.2]
+            importance_weight = 0.8 + (importance * 0.4)
+
+            #最终得分：相似度 * 重要性权重
+            combined_score = base_relevance * importance_weight
+            result["combined_score"] = combined_score
+        
+        # 排序并返回
+        sorted_results = sorted(
+            combined.values(),
+            key = lambda x: x["combined_score"],
+            reverse=True
+        )
+
+        return sorted_results[:limit]
+
 
