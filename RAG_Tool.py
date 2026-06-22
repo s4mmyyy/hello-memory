@@ -1,10 +1,9 @@
 
 from typing import Dict, Any, List, Optional
-import os
 import time
-from package.base import Tool, ToolParameter, tool_action
-from package.memory.rag.pipeline import create_rag_pipeline
-from package.core.llm import HelloAgentsLLM
+from hello_agents import  HelloAgentsLLM, ToolRegistry
+from hello_agents.tools.base import Tool, ToolParameter
+from hello_agents.memory.rag.pipeline import create_rag_pipeline
 from dotenv import load_dotenv
 load_dotenv()
 
