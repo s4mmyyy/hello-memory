@@ -233,6 +233,7 @@ class RAGtOOL(Tool):
 
             print(f"[RAG] Embedding progress: {min(i+batch_size, len(processed_texts))}/{len(processed_texts)}")
     
+    # 高级检索策略 - 多查询扩展(MQR)
     def _prompt_mqe(query: str, n: int) -> List[str]:
         """使用LLM生成多样化的查询扩展"""
         try:
@@ -269,3 +270,25 @@ class RAGtOOL(Tool):
 
         except Exception:
             return [query]
+
+    # 高级检索策略 - 假设文档嵌入（HyDE）
+    def _prompt_hyde(query: str) -> Optional[str]:
+        """生成假设性文档用于改善检索"""
+        try:
+            llm = HelloAgentsLLM
+            prompt=[
+                {"role": "system", "content": "根据用户问题，先写一段可能的答案性段落，用于向量检索的查询文档（不要分析过程）。"},
+                {"role": "user", "content": f"问题:{query}\n 请直接写一段中等长度、客观、包含关键术语的段落。"}
+            ]    
+
+            return llm.invoke(property)
+        except Exception:
+            return None
+    
+    # 高级检索策略 - 扩展检索框架
+    def search_vectors_expanded(
+            store = None, # 向量数据库连接对象
+            query: str = "", # 用户输入的搜索问题
+            tok_k: int = 8, # 最终要返回几条最相关的结果
+            rag_namespace: Optional[str] = None # 限定搜索哪个"命名空间"
+    ):
