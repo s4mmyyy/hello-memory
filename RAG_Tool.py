@@ -233,7 +233,7 @@ class RAGtOOL(Tool):
 
             print(f"[RAG] Embedding progress: {min(i+batch_size, len(processed_texts))}/{len(processed_texts)}")
     
-    # 高级检索策略 - 多查询扩展(MQR)
+    # 高级检索策略 - 多查询扩展(MQE)
     def _prompt_mqe(query: str, n: int) -> List[str]:
         """使用LLM生成多样化的查询扩展"""
         try:
@@ -290,5 +290,32 @@ class RAGtOOL(Tool):
             store = None, # 向量数据库连接对象
             query: str = "", # 用户输入的搜索问题
             tok_k: int = 8, # 最终要返回几条最相关的结果
-            rag_namespace: Optional[str] = None # 限定搜索哪个"命名空间"
-    ):
+            rag_namespace: Optional[str] = None, # 限定搜索哪个"命名空间"
+            only_rag_data: bool = True, #是否只搜索标记为RAG的数据
+            score_threshold: Optional[float] = None, # 相似度分数阈值，低于该值的结果会被过滤
+            enable_mqe: bool = False, # 是否启动多查询扩展(MQE)
+            mqe_expansions: int = 2, # MQE 生成的额外查询数量
+            enable_hyde: bool = False, # 是否启动 HyDE(假设文档向量)扩展
+            candidate_pool_multiplier: int = 4, # 候选池倍数，用于控制总检索数量
+    ) -> List[Dict]:                            # 返回字典列表，用于控制总检索数量
+        """
+        Search with query expansion using unified embedding and Qdrant
+        """
+        if not query: # 检查字符串是否为空
+            return []
+
+        # 创建默认存储
+        if store is None: # 如果没有外部传入存储对象
+            store = _create_default_vector_store() # 调用内部函数创建一个默认的向量存储
+
+        # 查询扩展（生成多个查询变体）
+        expansions: List[str] = [query] # 初始化扩展查询列表，最先放入原始查询
+
+        if enable_mqe and mqe_expansions > 0 : # 如果启用了 MQE 且扩展数量大于0
+            expansions.extend(_prompt_mqe(query, mqe_expansions))  #调用 MQE函数生成多个相关查询，并添加到列表
+        
+        if enable_hyde: # 如果其使用了HyDE扩展
+            hyde_text = _prompt_hyde(query) # 调用 HyDE 函数，根据查询生成一段假设文档文本
+            if hyde_text:
+                expansions.append(hyde_text)  #将假设文档也加入扩展列表
+
