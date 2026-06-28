@@ -289,7 +289,7 @@ class RAGtOOL(Tool):
     def search_vectors_expanded(
             store = None, # 向量数据库连接对象
             query: str = "", # 用户输入的搜索问题
-            tok_k: int = 8, # 最终要返回几条最相关的结果
+            top_k: int = 8, # 最终要返回几条最相关的结果
             rag_namespace: Optional[str] = None, # 限定搜索哪个"命名空间"
             only_rag_data: bool = True, #是否只搜索标记为RAG的数据
             score_threshold: Optional[float] = None, # 相似度分数阈值，低于该值的结果会被过滤
@@ -318,4 +318,54 @@ class RAGtOOL(Tool):
             hyde_text = _prompt_hyde(query) # 调用 HyDE 函数，根据查询生成一段假设文档文本
             if hyde_text:
                 expansions.append(hyde_text)  #将假设文档也加入扩展列表
+        
+        # 去重和修剪扩展列表
+        uniq: List[str] = [] # 新建一个空列表，用于存放去重后的查询
+        for e in expansions: # 遍历扩展列表中的每一个查询结构
+            if e and e not in uniq: # 如果查询非空且尚未出现在 uniq 中
+                uniq.append(e)  # 将其加入uniq列表
+        expansions = uniq[: max(1, len(uniq))] # 保留全部去重结果 (max(1, len)方式列表变空)
+
+        # 分配候选池
+        pool = max(top_k * candidate_pool_multiplier, 20) # 计算候选池总大小：top_k 乘以倍数，且不小于20
+        per = max(1, pool // max(1, len(expansions)))     # 将候选池平均分给每个扩展查询，至少每个查询检索 1 个结果
+
+        # 构建元数据过滤器
+        where = {"memory_type": "rag_chunk"} # 基础过滤条件: 内存类型必须是 tag_chunk
+        if only_rag_data:                    # 如果只需要 RAG 数据
+            where["is_rag_data"] = True      # 增加条件：标记is_rag_data 为True
+            where["data_source"] = "rag_pipeline" # 增加条件：数据来源为 rag_pipeline
+        if rag_namespace:
+            where["rag_namespace"] = rag_namespace # 按命名空间进一步过滤
+        """
+        执行完后，过滤器示例如下
+        {
+            "memory_type": "rag_chunk",      # 基础条件
+            "is_rag_data": True,             # 条件追加
+            "data_source": "rag_pipeline",   # 条件追加
+            "rag_namespace": "project_123"   # 条件追加
+        }
+        """
+        # 收集所有扩展查询的结果
+        agg: Dict[str, Dict] = {}  # 聚合字段，键为文档唯一 ID, 值为对应的搜索结果项
+        for q in expansions:       # 遍历每个查询扩展
+            qv = embed_query(q)    # 将文本查询编码为向量
+            hits = store.search_similar( # 在向量存储中执行相似度搜索
+                query_vector=qv,         # 使用刚得到的查询向量
+                limit=per,               # 最多返回 per ge结果
+                score_threshold=score_threshold, # 相似度阈值，低于此分数的结果会被排除
+                where=where                      # 遍历本次搜索返回的每一条结果
+            )
+            for h in hits:  # 遍历本次搜索返回的每一条结果
+                mid = h.get("metadata", {}).get("memory_id", h.get("id")) # 提取该结果的唯一标识(优先使用 memory_id)
+                s = float(h.get("score",0.0))   # 获取该结果的相似度分数，转换为浮点数
+                if mid not in agg or s > float(agg[mid].get("score",0.0)): #如果该 ID 还未记录，或当前分数更高
+                    agg[mid] = h  # 存入聚合字典，覆盖掉原来分数较低的结果
+                
+            # 按分数排序返回
+            merged = list(agg.values()) # 将聚合字典中的所有值取出，变成列表
+            merged.sort(key=lambda x: float(x.get("score",0.0)), reverse=True) # 按相似度分数降序排序
+            return merged[:top_k]  # 截取钱 top_k 条结果返回
+
+
 
